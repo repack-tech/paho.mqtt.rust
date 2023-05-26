@@ -74,6 +74,8 @@ use std::{
     },
     time::Duration,
 };
+use ffi::MQTTAsync_token;
+use crate::token::TokenInner;
 
 /////////////////////////////////////////////////////////////////////////////
 // AsynClient
@@ -116,6 +118,9 @@ pub type DisconnectedCallback = dyn FnMut(&AsyncClient, Properties, ReasonCode) 
 /// User callback signature for when subscribed messages are received.
 pub type MessageArrivedCallback = dyn FnMut(&AsyncClient, Option<Message>) + Send + 'static;
 
+/// User callback signature for when messages are delivered.
+pub type MessageDeliveryCompletedCallback = dyn FnMut(&AsyncClient, DeliveryToken) + Send + 'static;
+
 // The context provided for the client callbacks.
 //
 // Originally these needed to be kept together and managed with a single
@@ -133,6 +138,8 @@ struct CallbackContext {
     on_disconnected: Option<Box<DisconnectedCallback>>,
     /// Callback for when a message arrives from the server.
     on_message_arrived: Option<Box<MessageArrivedCallback>>,
+    /// Callback for when a message arrives from the server.
+    on_message_message_delivered: Option<Box<MessageDeliveryCompletedCallback>>,
 }
 
 impl AsyncClient {
@@ -354,6 +361,23 @@ impl AsyncClient {
         ffi::MQTTAsync_freeMessage(&mut cmsg);
         ffi::MQTTAsync_free(topic_name as *mut c_void);
         1
+    }
+
+    // Low-level callback from the C library when a message is delivered.
+    // We just pass the call on to the handler registered with the client, if any.
+    unsafe extern "C" fn on_delivered(context: *mut c_void, token: MQTTAsync_token,) {
+        debug!("Message delivered {:?}", token);
+
+        if !context.is_null() {
+            let cli = AsyncClient::from_raw(context);
+
+            if let Some(ref mut cb) = cli.inner.callback_context.lock().unwrap().on_message_message_delivered {
+                trace!("Invoking connected callback");
+                cb(&cli);
+            }
+
+            let _ = cli.into_raw();
+        }
     }
 
     // Set the disconnection callbacks, usually to prepare for creating
@@ -723,6 +747,43 @@ impl AsyncClient {
         }
     }
 
+
+
+    /// Sets the callback for when a message is delivered.
+    ///
+    /// # Arguments
+    ///
+    /// * `cb` The callback to register with the library. This can be a
+    ///     function or a closure.
+    pub fn set_delivered_callback<F>(&self, cb: F)
+        where
+            F: FnMut(&AsyncClient, MQTTAsync_token) + Send + 'static,
+    {
+        // A pointer to the inner client will serve as the callback context
+        let inner: &InnerAsyncClient = &self.inner;
+
+        // This should be protected by a mutex if we'll have a thread-safe client
+        inner.callback_context.lock().unwrap().on_message_message_delivered = Some(Box::new(cb));
+
+        unsafe {
+            ffi::MQTTAsync_setDeliveryCompleteCallback(
+                inner.handle,
+                inner as *const _ as *mut c_void,
+                Some(AsyncClient::on_delivered),
+            );
+        }
+    }
+
+    /// Removes the callback for when a message is delivered.
+    pub fn remove_delivered_callback(&self) {
+        self.inner.callback_context.lock().unwrap().on_message_message_delivered = None;
+
+        unsafe {
+            ffi::MQTTAsync_setDeliveryCompleteCallback(self.inner.handle, ptr::null_mut(), None);
+        }
+    }
+
+
     /// Attempts to publish a message to the MQTT broker, but returns an
     /// error immediately if there's a problem creating or queuing the
     /// message.
@@ -755,6 +816,35 @@ impl AsyncClient {
         tok.set_msgid(rsp_opts.copts.token as i16);
         Ok(tok)
     }
+
+
+    /// Gets the pending messages to be delivered
+    ///
+    /// Returns a Publish Error on failure so that the original message
+    /// can be recovered and sent again.
+    // pub fn pending_messages(&self) -> Result<DeliveryToken> {
+    //     debug!("Publish: {:?}", msg);
+    //
+    //     let ver = self.mqtt_version();
+    //     let tok = Token::new();
+    //
+    //     let rc = unsafe {
+    //         let mut tok: MQTTAsync_token = tok.into_raw();
+    //         ffi::MQTTAsync_getPendingTokens(
+    //             self.inner.handle,
+    //             &mut tok,
+    //         )
+    //     };
+    //
+    //     if rc != 0 {
+    //         let _ = unsafe { Token::from_raw(rsp_opts.copts.context) };
+    //         let msg: Message = tok.into();
+    //         return Err(Error::Publish(rc, msg));
+    //     }
+    //
+    //     tok.set_msgid(rsp_opts.copts.token as i16);
+    //     Ok(tok)
+    // }
 
     /// Publishes a message to the MQTT broker.
     ///
