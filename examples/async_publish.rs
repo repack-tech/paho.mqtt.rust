@@ -49,7 +49,7 @@ fn main() {
     });
 
     cli.set_delivered_callback(|client, tok| {
-        println!("CLBK {:?}", tok.get_id());
+        println!("CLBK {:?}", tok);
     });
 
     if let Err(err) = block_on(async {

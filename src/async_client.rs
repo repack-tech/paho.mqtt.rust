@@ -118,7 +118,7 @@ pub type DisconnectedCallback = dyn FnMut(&AsyncClient, Properties, ReasonCode) 
 pub type MessageArrivedCallback = dyn FnMut(&AsyncClient, Option<Message>) + Send + 'static;
 
 /// User callback signature for when messages are delivered.
-pub type MessageDeliveryCompletedCallback = dyn FnMut(&AsyncClient, DeliveryToken) + Send + 'static;
+pub type MessageDeliveryCompletedCallback = dyn FnMut(&AsyncClient, i16) + Send + 'static;
 
 // The context provided for the client callbacks.
 //
@@ -369,12 +369,10 @@ impl AsyncClient {
 
         if !context.is_null() {
             let cli = AsyncClient::from_raw(context);
-            let tok = DeliveryToken::new(Message::default());
-            tok.set_msgid(token as i16);
 
             if let Some(ref mut cb) = cli.inner.callback_context.lock().unwrap().on_message_delivered {
                 trace!("Invoking connected callback");
-                cb(&cli, tok);
+                cb(&cli, token as i16);
             }
 
             let _ = cli.into_raw();
@@ -758,7 +756,7 @@ impl AsyncClient {
     ///     function or a closure.
     pub fn set_delivered_callback<F>(&self, cb: F)
         where
-            F: FnMut(&AsyncClient, DeliveryToken) + Send + 'static,
+            F: FnMut(&AsyncClient, i16) + Send + 'static,
     {
         // A pointer to the inner client will serve as the callback context
         let inner: &InnerAsyncClient = &self.inner;
