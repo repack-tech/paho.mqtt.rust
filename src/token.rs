@@ -660,6 +660,15 @@ impl DeliveryToken {
         &self.msg
     }
 
+
+    /// Get the id of the message
+    pub fn get_id(&self) -> i16 {
+       if let Ok(inner) = self.inner.lock.try_lock() {
+         return inner.msg_id;
+       }
+        0
+    }
+
     /// Blocks the caller until the asynchronous operation completes.
     pub fn wait(self) -> Result<()> {
         block_on(self)

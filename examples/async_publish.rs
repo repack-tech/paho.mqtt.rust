@@ -29,6 +29,7 @@
 use futures::executor::block_on;
 use paho_mqtt as mqtt;
 use std::{env, process};
+use libc::ftok;
 
 /////////////////////////////////////////////////////////////////////////////
 
@@ -47,6 +48,10 @@ fn main() {
         process::exit(1);
     });
 
+    cli.set_delivered_callback(|client, tok| {
+        println!("CLBK {:?}", tok.get_id());
+    });
+
     if let Err(err) = block_on(async {
         // Connect with default options and wait for it to complete or fail
         // The default is an MQTT v3.x connection.
@@ -56,7 +61,13 @@ fn main() {
         // Create a message and publish it
         println!("Publishing a message on the topic 'test'");
         let msg = mqtt::Message::new("test", "Hello Rust MQTT world!", mqtt::QOS_1);
-        cli.publish(msg).await?;
+        let tok = cli.publish(msg);
+        println!("PUB {:?}", tok.get_id());
+        tok.await?;
+        let msg = mqtt::Message::new("test", "Hello Rust MQTT world2!", mqtt::QOS_1);
+        let tok = cli.publish(msg);
+        println!("PUB {:?}", tok.get_id());
+        tok.await?;
 
         // Disconnect from the broker
         println!("Disconnecting");

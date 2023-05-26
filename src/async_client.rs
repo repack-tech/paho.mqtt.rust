@@ -75,7 +75,6 @@ use std::{
     time::Duration,
 };
 use ffi::MQTTAsync_token;
-use crate::token::TokenInner;
 
 /////////////////////////////////////////////////////////////////////////////
 // AsynClient
