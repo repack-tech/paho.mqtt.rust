@@ -663,10 +663,13 @@ impl DeliveryToken {
 
     /// Get the id of the message
     pub fn get_id(&self) -> i16 {
-       if let Ok(inner) = self.inner.lock.lock() {
-         return inner.msg_id;
-       }
-        0
+        match self.inner.lock.lock() {
+            Ok(inner) => inner.msg_id,
+            Err(err) => {
+                eprintln!("{}", err);
+                -1
+            }
+        }
     }
 
     /// Blocks the caller until the asynchronous operation completes.
