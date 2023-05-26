@@ -663,7 +663,7 @@ impl DeliveryToken {
 
     /// Get the id of the message
     pub fn get_id(&self) -> i16 {
-       if let Ok(inner) = self.inner.lock.try_lock() {
+       if let Ok(inner) = self.inner.lock.lock() {
          return inner.msg_id;
        }
         0
