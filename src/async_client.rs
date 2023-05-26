@@ -139,7 +139,7 @@ struct CallbackContext {
     /// Callback for when a message arrives from the server.
     on_message_arrived: Option<Box<MessageArrivedCallback>>,
     /// Callback for when a message arrives from the server.
-    on_message_message_delivered: Option<Box<MessageDeliveryCompletedCallback>>,
+    on_message_delivered: Option<Box<MessageDeliveryCompletedCallback>>,
 }
 
 impl AsyncClient {
@@ -370,10 +370,12 @@ impl AsyncClient {
 
         if !context.is_null() {
             let cli = AsyncClient::from_raw(context);
+            let tok = DeliveryToken::new(Message::default());
+            tok.set_msgid(token as i16);
 
-            if let Some(ref mut cb) = cli.inner.callback_context.lock().unwrap().on_message_message_delivered {
+            if let Some(ref mut cb) = cli.inner.callback_context.lock().unwrap().on_message_delivered {
                 trace!("Invoking connected callback");
-                cb(&cli);
+                cb(&cli, tok);
             }
 
             let _ = cli.into_raw();
@@ -757,13 +759,13 @@ impl AsyncClient {
     ///     function or a closure.
     pub fn set_delivered_callback<F>(&self, cb: F)
         where
-            F: FnMut(&AsyncClient, MQTTAsync_token) + Send + 'static,
+            F: FnMut(&AsyncClient, DeliveryToken) + Send + 'static,
     {
         // A pointer to the inner client will serve as the callback context
         let inner: &InnerAsyncClient = &self.inner;
 
         // This should be protected by a mutex if we'll have a thread-safe client
-        inner.callback_context.lock().unwrap().on_message_message_delivered = Some(Box::new(cb));
+        inner.callback_context.lock().unwrap().on_message_delivered = Some(Box::new(cb));
 
         unsafe {
             ffi::MQTTAsync_setDeliveryCompleteCallback(
@@ -776,7 +778,7 @@ impl AsyncClient {
 
     /// Removes the callback for when a message is delivered.
     pub fn remove_delivered_callback(&self) {
-        self.inner.callback_context.lock().unwrap().on_message_message_delivered = None;
+        self.inner.callback_context.lock().unwrap().on_message_delivered = None;
 
         unsafe {
             ffi::MQTTAsync_setDeliveryCompleteCallback(self.inner.handle, ptr::null_mut(), None);
@@ -818,21 +820,21 @@ impl AsyncClient {
     }
 
 
-    /// Gets the pending messages to be delivered
-    ///
-    /// Returns a Publish Error on failure so that the original message
-    /// can be recovered and sent again.
+    // /// Gets the pending messages to be delivered
+    // ///
+    // /// Returns a Publish Error on failure so that the original message
+    // /// can be recovered and sent again.
     // pub fn pending_messages(&self) -> Result<DeliveryToken> {
     //     debug!("Publish: {:?}", msg);
     //
     //     let ver = self.mqtt_version();
-    //     let tok = Token::new();
+    //     let tok : Vec<Token> = vec![];
     //
     //     let rc = unsafe {
-    //         let mut tok: MQTTAsync_token = tok.into_raw();
+    //         // let mut tok: MQTTAsync_token = tok.into_raw().into();
     //         ffi::MQTTAsync_getPendingTokens(
     //             self.inner.handle,
-    //             &mut tok,
+    //             &mut &mut *tok,
     //         )
     //     };
     //
