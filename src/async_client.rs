@@ -6,11 +6,11 @@
  * Copyright (c) 2017-2023 Frank Pagliughi <fpagliughi@mindspring.com>
  *
  * All rights reserved. This program and the accompanying materials
- * are made available under the terms of the Eclipse Public License v1.0
+ * are made available under the terms of the Eclipse Public License v2.0
  * and Eclipse Distribution License v1.0 which accompany this distribution.
  *
  * The Eclipse Public License is available at
- *    http://www.eclipse.org/legal/epl-v10.html
+ *    http://www.eclipse.org/legal/epl-v20.html
  * and the Eclipse Distribution License is available at
  *   http://www.eclipse.org/org/documents/edl-v10.php.
  *
@@ -66,6 +66,7 @@ use crate::{
 use crossbeam_channel as channel;
 use std::{
     ffi::{CStr, CString},
+    mem,
     os::raw::{c_char, c_int, c_void},
     ptr, slice, str,
     sync::{
@@ -104,6 +105,10 @@ pub(crate) struct InnerAsyncClient {
     // Arbitrary, user-supplied data
     user_data: Option<UserData>,
 }
+
+// The client is safe to send or share between threads.
+unsafe impl Send for InnerAsyncClient {}
+unsafe impl Sync for InnerAsyncClient {}
 
 /// User callback type for when the client is connected.
 pub type ConnectedCallback = dyn FnMut(&AsyncClient) + Send + 'static;
@@ -188,7 +193,7 @@ impl AsyncClient {
             PersistenceType::None => (ffi::MQTTCLIENT_PERSISTENCE_NONE, ptr::null_mut()),
             PersistenceType::File => (ffi::MQTTCLIENT_PERSISTENCE_DEFAULT, ptr::null_mut()),
             PersistenceType::FilePath(path) => {
-                let s = path.to_str().ok_or(errors::PersistenceError)?;
+                let s = path.to_str().ok_or(errors::Error::PersistenceError)?;
                 file_path = CString::new(s).unwrap_or_default();
                 let pptr = file_path.as_ptr() as *mut c_void;
                 (ffi::MQTTCLIENT_PERSISTENCE_DEFAULT, pptr)
@@ -418,13 +423,22 @@ impl AsyncClient {
     /// This is the version of the current connection, or the most recent
     /// connection if currently disconnected. Before an initial connection
     /// is made, this will report MQTT_VERSION_DEFAULT (0).
-    pub fn mqtt_version(&self) -> u32 {
+    pub fn mqtt_version(&self) -> MqttVersion {
+        MqttVersion::from(self.mqtt_version_raw())
+    }
+
+    /// The raw, integer value of the MQTT version
+    pub fn mqtt_version_raw(&self) -> u32 {
         self.inner.mqtt_version.load(Ordering::SeqCst)
     }
 
     /// Sets the current MQTT version.
     /// This is set when a connection is requested or established.
-    pub(crate) fn set_mqtt_version(&self, ver: u32) {
+    pub(crate) fn set_mqtt_version<V>(&self, ver: V)
+    where
+        V: Into<MqttVersion>,
+    {
+        let ver = ver.into() as u32;
         trace!("Updating client MQTT version: {}", ver);
         self.inner.mqtt_version.store(ver, Ordering::SeqCst);
     }
@@ -467,7 +481,7 @@ impl AsyncClient {
         let rc = unsafe { ffi::MQTTAsync_connect(self.inner.handle, &lkopts.copts) };
 
         if rc != 0 {
-            let _ = unsafe { Token::from_raw(lkopts.copts.context) };
+            mem::drop(unsafe { Token::from_raw(lkopts.copts.context) });
             return ConnectToken::from_error(rc);
         }
 
@@ -512,7 +526,7 @@ impl AsyncClient {
         let rc = unsafe { ffi::MQTTAsync_connect(self.inner.handle, &lkopts.copts) };
 
         if rc != 0 {
-            let _ = unsafe { Token::from_raw(lkopts.copts.context) };
+            mem::drop(unsafe { Token::from_raw(lkopts.copts.context) });
             return ConnectToken::from_error(rc);
         }
 
@@ -568,7 +582,7 @@ impl AsyncClient {
         let rc = unsafe { ffi::MQTTAsync_disconnect(self.inner.handle, &opts.copts) };
 
         if rc != 0 {
-            let _ = unsafe { Token::from_raw(opts.copts.context) };
+            mem::drop(unsafe { Token::from_raw(opts.copts.context) });
             return Token::from_error(rc);
         }
 
@@ -822,7 +836,7 @@ impl AsyncClient {
         };
 
         if rc != 0 {
-            let _ = unsafe { Token::from_raw(rsp_opts.copts.context) };
+            mem::drop(unsafe { Token::from_raw(rsp_opts.copts.context) });
             let msg: Message = tok.into();
             return Err(Error::Publish(rc, msg));
         }
@@ -879,14 +893,16 @@ impl AsyncClient {
     /// `topic` The topic name
     /// `qos` The quality of service requested for messages
     ///
-    pub fn subscribe<S>(&self, topic: S, qos: i32) -> SubscribeToken
+    pub fn subscribe<S, Q>(&self, topic: S, qos: Q) -> SubscribeToken
     where
         S: Into<String>,
+        Q: Into<QoS>,
     {
         let ver = self.mqtt_version();
         let tok = Token::from_request(None, ServerRequest::Subscribe);
         let mut rsp_opts = ResponseOptions::new(ver, tok.clone());
         let topic = CString::new(topic.into()).unwrap();
+        let qos = qos.into() as i32;
 
         debug!("Subscribe to '{:?}' @ QOS {}", topic, qos);
 
@@ -895,7 +911,7 @@ impl AsyncClient {
         };
 
         if rc != 0 {
-            let _ = unsafe { Token::from_raw(rsp_opts.copts.context) };
+            mem::drop(unsafe { Token::from_raw(rsp_opts.copts.context) });
             return SubscribeToken::from_error(rc);
         }
 
@@ -911,19 +927,20 @@ impl AsyncClient {
     /// `opts` Options for the subscription
     /// `props` MQTT v5 properties
     ///
-    pub fn subscribe_with_options<S, T, P>(
+    pub fn subscribe_with_options<S, Q, T, P>(
         &self,
         topic: S,
-        qos: i32,
+        qos: Q,
         opts: T,
         props: P,
     ) -> SubscribeToken
     where
         S: Into<String>,
+        Q: Into<QoS>,
         T: Into<SubscribeOptions>,
         P: Into<Option<Properties>>,
     {
-        debug_assert!(self.mqtt_version() >= ffi::MQTTVERSION_5);
+        debug_assert!(self.mqtt_version() >= MqttVersion::V5);
 
         let tok = Token::from_request(None, ServerRequest::Subscribe);
         let mut rsp_opts = ResponseOptionsBuilder::new()
@@ -933,6 +950,7 @@ impl AsyncClient {
             .finalize();
 
         let topic = CString::new(topic.into()).unwrap();
+        let qos = qos.into() as i32;
 
         debug!("Subscribe to '{:?}' @ QOS {}", topic, qos);
 
@@ -941,7 +959,7 @@ impl AsyncClient {
         };
 
         if rc != 0 {
-            let _ = unsafe { Token::from_raw(rsp_opts.copts.context) };
+            mem::drop(unsafe { Token::from_raw(rsp_opts.copts.context) });
             return SubscribeToken::from_error(rc);
         }
 
@@ -955,9 +973,10 @@ impl AsyncClient {
     /// `topics` The collection of topic names
     /// `qos` The quality of service requested for messages
     ///
-    pub fn subscribe_many<T>(&self, topics: &[T], qos: &[i32]) -> SubscribeManyToken
+    pub fn subscribe_many<T, Q>(&self, topics: &[T], qos: &[Q]) -> SubscribeManyToken
     where
         T: AsRef<str>,
+        Q: Into<QoS> + Copy,
     {
         let n = topics.len();
 
@@ -966,6 +985,7 @@ impl AsyncClient {
         let tok = Token::from_request(None, ServerRequest::SubscribeMany(n));
         let mut rsp_opts = ResponseOptions::new(ver, tok.clone());
         let topics = StringCollection::new(topics);
+        let qos: Vec<i32> = qos.iter().map(|q| (*q).into() as i32).collect();
 
         debug!("Subscribe to '{:?}' @ QOS {:?}", topics, qos);
 
@@ -980,7 +1000,7 @@ impl AsyncClient {
         };
 
         if rc != 0 {
-            let _ = unsafe { Token::from_raw(rsp_opts.copts.context) };
+            mem::drop(unsafe { Token::from_raw(rsp_opts.copts.context) });
             return SubscribeManyToken::from_error(rc);
         }
 
@@ -996,18 +1016,19 @@ impl AsyncClient {
     /// `opts` Subscribe options (one per topic)
     /// `props` MQTT v5 properties
     ///
-    pub fn subscribe_many_with_options<T, P>(
+    pub fn subscribe_many_with_options<T, Q, P>(
         &self,
         topics: &[T],
-        qos: &[i32],
+        qos: &[Q],
         opts: &[SubscribeOptions],
         props: P,
     ) -> SubscribeManyToken
     where
         T: AsRef<str>,
+        Q: Into<QoS> + Copy,
         P: Into<Option<Properties>>,
     {
-        debug_assert!(self.mqtt_version() >= ffi::MQTTVERSION_5);
+        debug_assert!(self.mqtt_version() >= MqttVersion::V5);
 
         let n = topics.len();
         // TOOD: Make sure topics & qos are same length (or use min)
@@ -1019,6 +1040,7 @@ impl AsyncClient {
             .finalize();
 
         let topics = StringCollection::new(topics);
+        let qos: Vec<i32> = qos.iter().map(|q| (*q).into() as i32).collect();
 
         debug!(
             "Subscribe to '{:?}' @ QOS {:?} w/ opts: {:?}",
@@ -1037,7 +1059,7 @@ impl AsyncClient {
         };
 
         if rc != 0 {
-            let _ = unsafe { Token::from_raw(rsp_opts.copts.context) };
+            mem::drop(unsafe { Token::from_raw(rsp_opts.copts.context) });
             return SubscribeManyToken::from_error(rc);
         }
 
@@ -1067,7 +1089,7 @@ impl AsyncClient {
         };
 
         if rc != 0 {
-            let _ = unsafe { Token::from_raw(rsp_opts.copts.context) };
+            mem::drop(unsafe { Token::from_raw(rsp_opts.copts.context) });
             return Token::from_error(rc);
         }
 
@@ -1086,7 +1108,7 @@ impl AsyncClient {
     where
         S: Into<String>,
     {
-        debug_assert!(self.mqtt_version() >= ffi::MQTTVERSION_5);
+        debug_assert!(self.mqtt_version() >= MqttVersion::V5);
 
         let tok = Token::from_request(None, ServerRequest::Unsubscribe);
         let mut rsp_opts = ResponseOptionsBuilder::new()
@@ -1103,7 +1125,7 @@ impl AsyncClient {
         };
 
         if rc != 0 {
-            let _ = unsafe { Token::from_raw(rsp_opts.copts.context) };
+            mem::drop(unsafe { Token::from_raw(rsp_opts.copts.context) });
             return Token::from_error(rc);
         }
 
@@ -1140,7 +1162,7 @@ impl AsyncClient {
         };
 
         if rc != 0 {
-            let _ = unsafe { Token::from_raw(rsp_opts.copts.context) };
+            mem::drop(unsafe { Token::from_raw(rsp_opts.copts.context) });
             return Token::from_error(rc);
         }
 
@@ -1159,7 +1181,7 @@ impl AsyncClient {
     where
         T: AsRef<str>,
     {
-        debug_assert!(self.mqtt_version() >= ffi::MQTTVERSION_5);
+        debug_assert!(self.mqtt_version() >= MqttVersion::V5);
 
         let n = topics.len();
         let tok = Token::from_request(None, ServerRequest::UnsubscribeMany(n));
@@ -1182,7 +1204,7 @@ impl AsyncClient {
         };
 
         if rc != 0 {
-            let _ = unsafe { Token::from_raw(rsp_opts.copts.context) };
+            mem::drop(unsafe { Token::from_raw(rsp_opts.copts.context) });
             return Token::from_error(rc);
         }
 
@@ -1276,6 +1298,14 @@ impl AsyncClient {
     /// CreateOptionsBuilder for symmetry
     pub fn client_id(&self) -> String {
         self.inner.client_id.clone().into_string().unwrap()
+    }
+
+    /// Returns server URI used for connection
+    ///
+    /// Server URI is returned as a rust String as set in a
+    /// CreateOptionsBuilder for symmetry
+    pub fn server_uri(&self) -> String {
+        self.inner.server_uri.clone().into_string().unwrap()
     }
 }
 
@@ -1473,5 +1503,19 @@ mod tests {
         );
         let retrieved = client.unwrap().client_id();
         assert_eq!(retrieved, c_id.to_string());
+    }
+
+    #[test]
+    fn test_get_server_uri() {
+        let server_uri = "tcp://localhost:1883";
+        let client = CreateOptionsBuilder::new()
+            .server_uri(server_uri)
+            .create_client();
+        assert!(
+            client.is_ok(),
+            "Error in creating async client with server_uri"
+        );
+        let retrieved = client.unwrap().server_uri();
+        assert_eq!(retrieved, server_uri.to_string());
     }
 }
